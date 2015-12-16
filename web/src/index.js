@@ -1,10 +1,18 @@
-require("../lib/zepto");
+window.$ = window.jQuery = require("../lib/jquery");
+
 var EventManager    = require('../lib/event'),
 	Anyproxy_wsUtil = require("../lib/anyproxy_wsUtil"),
 	React           = require("../lib/react");
 
 var WsIndicator = require("./wsIndicator").init(React),
-	RecordPanel = require("./recordPanel").init(React);
+	RecordPanel = require("./recordPanel").init(React),
+	Popup       = require("./popup").init(React);
+
+var PopupContent = {
+	map    : require("./mapPanel").init(React),
+	detail : require("./detailPanel").init(React),
+	filter : require("./filter").init(React)
+};
 
 var ifPause     = false,
     recordSet   = [];
@@ -15,17 +23,25 @@ var ifPause     = false,
 //Event : wsEnd
 var eventCenter = new EventManager();
 
+//merge : right --> left
+function util_merge(left,right){
+    for(var key in right){
+        left[key] = right[key];
+    }
+    return left;
+}
+
 //invoke AnyProxy web socket util
 (function(){
 	try{
 		var ws = window.ws = new Anyproxy_wsUtil({
-			baseUrl     : document.getElementById("baseUrl").value,
-			port        : document.getElementById("socketPort").value,
+			baseUrl       : document.getElementById("baseUrl").value,
+			port          : document.getElementById("socketPort").value,
 			onOpen : function(){
 				eventCenter.dispatchEvent("wsOpen");
 			},
-			onGetUpdate : function(content){
-				eventCenter.dispatchEvent("wsGetUpdate",content);
+			onGetUpdate : function(record){
+				eventCenter.dispatchEvent("wsGetUpdate",record);
 			},
 			onError     : function(e){
 				eventCenter.dispatchEvent("wsEnd");
@@ -63,16 +79,24 @@ var eventCenter = new EventManager();
 })();
 
 
-//record panel
+//init popup
+var showPop;
 (function(){
-	//merge : right --> left
-	function util_merge(left,right){
-	    for(var key in right){
-	        left[key] = right[key];
-	    }
-	    return left;
-	}
+	$("body").append('<div id="J_popOuter"></div>');
+	var pop = React.render(
+		<Popup />,
+		document.getElementById("J_popOuter")
+	);
 
+	showPop = function(popArg){
+		var stateArg = util_merge({show : true },popArg);
+		pop.setState(stateArg);
+	};
+})();
+
+//init record panel
+var recorder;
+(function(){
 	function updateRecordSet(newRecord){
 		if(ifPause) return;
 
@@ -89,29 +113,52 @@ var eventCenter = new EventManager();
 			// React.addons.Perf.stop();
 		}
 	}
+
+	function initRecordSet(){
+		$.getJSON("/lastestLog",function(res){
+			if(typeof res == "object"){
+				res.map(function(item){
+					if(item.id){
+						recordSet[item.id] = item;
+					}
+				});
+				eventCenter.dispatchEvent("recordSetUpdated");
+			}
+		});
+	}
+
 	eventCenter.addListener("wsGetUpdate",updateRecordSet);
 
-	var Panel = React.render(
-		<RecordPanel />,
-		document.getElementById("J_content")
-	);
-
 	eventCenter.addListener('recordSetUpdated',function(){
-		Panel.setState({
+		recorder.setState({
 			list : recordSet
 		});
 	});
 
 	eventCenter.addListener("filterUpdated",function(newKeyword){
-		Panel.setState({
+		recorder.setState({
 			filter: newKeyword
 		});
 	});
+
+	function showDetail(data){
+		showPop({left:"35%",content:React.createElement(PopupContent["detail"], {data:data})});
+	}
+
+	//init recorder panel
+	recorder = React.render(
+		<RecordPanel onSelect={showDetail}/>,
+		document.getElementById("J_content")
+	);
+
+	initRecordSet();
 })();
 
 
 //action bar
 (function(){
+
+	//clear log
 	function clearLogs(){
 		recordSet = [];
 		eventCenter.dispatchEvent("recordSetUpdated");
@@ -130,6 +177,7 @@ var eventCenter = new EventManager();
 		clearLogs();
 	});
 
+	//start , pause
 	var statusBtn = $(".J_statusBtn");
 	statusBtn.on("click",function(e){
 		e.stopPropagation();
@@ -145,26 +193,81 @@ var eventCenter = new EventManager();
 		}
 	});
 
-	function switchFilterWidget(ifToShow){
-		if(ifToShow){
-			$(".J_filterSection").show();
-			$("#J_filterKeyword").focus();
-		}else{
-			$(".J_filterSection").hide();
-			$("#J_filterKeyword").val("");
+	//preset button
+	(function (){
+		var TopBtn = React.createClass({
+			getInitialState: function(){
+				return {
+					inUse : false
+				};
+			},
+			render: function(){
+				var self = this,
+					iconClass = self.state.inUse ? "uk-icon-check"      : self.props.icon,
+					btnClass  = self.state.inUse ? "topBtn topBtnInUse" : "topBtn";
+
+				return <a href="#"><span className={btnClass} onClick={self.props.onClick}><i className={iconClass}></i>{self.props.title}</span></a>
+			}
+		});
+
+		// filter
+		var filterBtn,
+		    FilterPanel = PopupContent["filter"],
+			filterPanelEl;
+
+		filterBtn = React.render(<TopBtn icon="uk-icon-filter" title="Filter" onClick={filterBtnClick}/>, document.getElementById("J_filterBtnContainer"));
+		filterPanelEl = (<FilterPanel onChangeKeyword={updateKeyword} /> );
+
+		function updateKeyword(key){
+			eventCenter.dispatchEvent("filterUpdated",key);
+			filterBtn.setState({inUse : !!key});
 		}
-	}
+		function filterBtnClick(){
+			showPop({ left:"60%", content:filterPanelEl });
+		}
 
-	$(".J_toggleFilterBtn").on("click",function(){
-		switchFilterWidget( $(".J_filterSection").css("display") == "none" );
-	});
+		// map local
+		var mapBtn,
+			mapPanelEl;
+		function onChangeMapConfig(cfg){
+			mapBtn.setState({inUse : cfg && cfg.length});
+		}
 
-	$(".J_filterCloseBtn").on("click",function(){
-		switchFilterWidget(false);
-	});
+		function mapBtnClick(){
+			showPop({left:"60%", content:mapPanelEl });
+		}
+
+		//detect whether to show the map btn
+		require("./mapPanel").fetchConfig(function(initConfig){
+			var MapPanel = PopupContent["map"];
+			mapBtn     = React.render(<TopBtn icon="uk-icon-shield" title="Map Local" onClick={mapBtnClick} />,document.getElementById("J_filterContainer"));
+			mapPanelEl = (<MapPanel onChange={onChangeMapConfig} />);
+			onChangeMapConfig(initConfig);
+		});
+
+		var t = true;
+		setInterval(function(){
+			t = !t;
+			// mapBtn && mapBtn.setState({inUse : t})
+		},300);
 
 
-	$("#J_filterKeyword").on("change keyup",function(){
-		eventCenter.dispatchEvent("filterUpdated",this.value);
-	});
+
+	})();
+
+	//other button
+	(function(){
+		$(".J_customButton").on("click",function(){
+			var thisEl = $(this),
+				iframeUrl = thisEl.attr("iframeUrl");
+
+			if(!iframeUrl){
+				throw new Error("cannot find the url assigned for this button");
+			}
+
+			var iframeEl = React.createElement("iframe",{src:iframeUrl,frameBorder:0});
+			showPop({left:"35%", content: iframeEl });
+		});
+	})();
+
 })();
